@@ -1,0 +1,4 @@
+build
+dist
+BixUtils.egg-info
+BixUtils/__pycache__
