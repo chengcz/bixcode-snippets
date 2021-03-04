@@ -6,77 +6,6 @@ import sys
 import bz2
 import gzip
 import time
-from .log import logger
-
-
-class Files(object):
-    '''
-        open file as file handle for iterator
-    '''
-
-    def __init__(self, File):
-        self._fos = File
-
-    def __iter__(self):
-        if self._fos.lower().endswith(('.gz', '.gzip')):
-            fgz = True
-            fp = gzip.open(self._fos)
-        elif self._fos.lower().endswith('.bz2'):
-            fgz = True
-            fp = bz2.BZ2File(self._fos)
-        else:
-            fgz = False
-            fp = open(self._fos)
-
-        logger.info('reading file: {}'.format(os.path.basename(self._fos)))
-        for index, line in enumerate(fp):
-            # if index % 50000 == 0 and index != 0:
-            #     logger.info('working on line NO. of {}: {:,}'.format(
-            #         os.path.basename(self._fos), index
-            #     ))
-            try:
-                if fgz:
-                    line = line.decode()
-                # if isinstance(line, bytes):
-                # line = line.decode('utf-8')
-            except:
-                pass
-            yield line
-        fp.close()
-
-
-class FileHandles(object):
-    '''
-    '''
-    def __init__(self):
-        self._fps = {}
-
-    def __str__(self):
-        return "<FileHandles object for output file collapse ... >"
-
-    def open(self, tag, filepath, mode='w', gzip=False):
-        self._fps[tag] = open(filepath, mode=mode)
-
-    def write(self, tag, string):
-        if not self._fps.get(tag):
-            raise FileHandleError('output file is missing, pls create use FileHandles.open().')
-        self._fps[tag].write(string)
-
-    def getfp(self, tag):
-        return self._fps[tag]
-
-    def close(self, tag):
-        self._fps[tag].close()
-
-    def closeall(self):
-        for ft in self._fps:
-            self.close(ft)
-            # self._fps[i].close()
-
-
-class FileHandleError(Exception):
-    def __init__(self, info):
-        self.message = info
 
 
 def LinkFile(source, target, relative=False, backup=True):
@@ -97,17 +26,17 @@ def LinkFile(source, target, relative=False, backup=True):
         target = '{}{}{}'.format(target, os.sep, os.path.basename(source))
     if os.path.exists(target):
         if os.path.islink(target) and os.path.realpath(target) == source:
-            logger.info('file link is exists and right, skip!')
+            print('file link is exists and right, skip!')
             return
         if backup:
-            logger.warning('link\'s target is another source file, backup link!')
+            print('link\'s target is another source file, backup link!')
             FileBackup(target)
         else:
             os.remove(target)
     dirname, basename = os.path.split(target)
     if relative:
         source = RelativePath(source, dirname)
-    logger.info('link file "" to "{}"'.format(source, target))
+    print('link file "" to "{}"'.format(source, target))
     os.symlink(source, target)
 
 
@@ -122,15 +51,10 @@ def FileBackup(file):
         while os.path.exists(backupfile):
             count += 1
             backupfile = '{}.{}-{:0>2}.bak'.format(file, timer, count)
-        logger.info("Backing up {0} to {1}".format(file, backupfile))
+        print("Backing up {0} to {1}".format(file, backupfile))
         os.rename(file, backupfile)
     else:
-        logger.warning('{0} doesn\'t exist! skip this links ... '.format(file))
-
-
-def MakeDirs(path, mode=0o755):
-    if not os.path.exists(path):
-        os.makedirs(path, mode=mode)
+        print('{0} doesn\'t exist! skip this links ... '.format(file))
 
 
 def FileName(path):

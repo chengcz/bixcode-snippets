@@ -1,7 +1,76 @@
 #!/usr/bin/env python
 
-from .log import logger
-from .file import Files, FileHandles, LinkFile, MakeDirs, FileName
+import os
+import sys
+import bz2
+import gzip
+
+
+def MakeDirs(path, mode=0o755):
+    if not os.path.exists(path):
+        os.makedirs(path, mode=mode)
+
+
+def FileName(filepath):
+    fname = filepath.rpartition(os.sep)[-1]
+    fname = fname.rpartition('.')[0]
+    return fname
+
+
+class Files(object):
+    '''
+        open file as file handle for iterator
+    '''
+
+    def __init__(self, File):
+        self._fos = File
+
+    def __iter__(self):
+        if self._fos.lower().endswith(('.gz', '.gzip')):
+            fp = gzip.open(self._fos, 'rt')
+        elif self._fos.lower().endswith('.bz2'):
+            fp = bz2.BZ2File(self._fos, 'rt')
+        else:
+            fp = open(self._fos, 'r')
+
+        print('reading file: {}'.format(os.path.basename(self._fos)))
+        for index, line in enumerate(fp):
+            yield line
+        fp.close()
+
+
+class FileHandles(object):
+    '''
+    '''
+    def __init__(self):
+        self._fps = {}
+
+    def __str__(self):
+        return "<FileHandles object for output file collapse ... >"
+
+    def open(self, tag, filepath, mode='w', gzip=False):
+        self._fps[tag] = open(filepath, mode=mode)
+
+    def write(self, tag, string):
+        if not self._fps.get(tag):
+            raise FileHandleError('output file is missing, pls create use FileHandles.open().')
+        self._fps[tag].write(string)
+
+    def getfp(self, tag):
+        return self._fps[tag]
+
+    def close(self, tag):
+        self._fps[tag].close()
+
+    def closeall(self):
+        for ft in self._fps:
+            self.close(ft)
+            # self._fps[i].close()
+
+
+class FileHandleError(Exception):
+    def __init__(self, info):
+        self.message = info
 
 
 class SequenceError(Exception):
@@ -193,7 +262,7 @@ def __guess_seq_file_format(fp):
     if not fp:
         raise Exception('File Name is Null, please input right path.')
 
-    if fp.lower().endswith(('fasta', 'fa', 'fa.gz', 'fasta.gz', 'fas')):
+    if fp.lower().endswith(('fasta', 'fa', 'fa.gz', 'fasta.gz', 'fas', 'fas.gz')):
         return 'fasta'
     elif fp.lower().endswith(('fastq', 'fq', 'fq.gz', 'fastq.gz')):
         return 'fastq'
@@ -224,16 +293,7 @@ def SplitFastxByPart(fp1, part, outdir, basename=None, fp2=None, infm=None):
 
     MakeDirs(outdir)
     if part == 1:
-        logger.warning('one split file not\'s an efficient option.')
-        # logger.warning('split file number is {}, do not split, soft links.'.format(part))
-        # suffix = '.gz' if fp1.endswith('gz') else ''
-        # if infm == 'fasta':
-        #     LinkFile(fp1, '{}/{}.part01.fa{}'.format(outdir, basename, suffix))
-        # elif infm == 'fastq':
-        #     LinkFile(fp1, '{}/{}.part01.R1.fq{}'.format(outdir, basename, suffix))
-        #     if fp2:
-        #         LinkFile(fp2, '{}/{}.part01.R2.fq{}'.format(outdir, basename, suffix))
-        # return
+        print('one split file not\'s an efficient option.')
 
     fps = FileHandles()
     for order in range(part):
