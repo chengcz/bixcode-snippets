@@ -1,3 +1,13 @@
+.*
 _*
 build
 dist
+test
+example
+*zip
+*gz
+geneFamily/src
+monitor/monitor.sh
+monitor/pymonitor.conf
+monitor/pymonitor.py
+monitor/task_monitor.py
