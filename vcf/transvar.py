@@ -1,113 +1,272 @@
 #!/usr/bin/env python
-# -*- coding:utf-8 -*-
 
 import os
 import re
 import sys
-import pysam
-from io import open
+from pysam import FastaFile
 
 
-def var2tab(inp, outp, refseq):
-    '''
-    fakevcf2tab.py
-    '''
-    title = [
-        'gHGVS', 'input', 'type', 'Func.refGene', 'Gene.refGene',
-        'GeneDetail.refGene', 'ExonicFunc.refGene', 'AAChange.refGene'
+class TransvarObj(object):
+    cols = [
+        'input', 'transcript', 'gene', 'strand', 'coordinates(gDNA/cDNA/protein)',
+        'region', 'info'
     ]
-    with open(refseq) as f:
-        refseq = [i.strip() for i in f]
+    def __init__(self, attrs):
+        if isinstance(attrs, str):
+            attrs = attrs.strip().split('\t')
 
-    with open(inp) as inf, open(outp, 'w') as outf:
-        #print(type(outf), type(inf))
-        header = '\t'.join(title)
-        outf.write('chro\tpos\tref\talt\t{}\n'.format(header).decode('utf-8'))
-        for line in inf:
-            chro, pos, _, ref, alt, _, _, info = line.strip().split('\t')
-            info = [i.split('=') for i in info.split(';')]
-            info = {i[0]:i[1] for i in info if len(i)==2}
-            # chr7    87138645    .    A    G    .    .    candidate_snv_variants=chr7:g.87138645A>T;candidate_codons=ATC,ATA;pHGVS=p.I1145I;gHGVS=chr7:g.87138645A>G;cHGVS=c.3435T>C;source=RefSeq;CSQN=Synonymous;reference_codon=ATT;input=ABCB1:p.I1145I;dbxref=GeneID:5243,HGNC:40,HPRD:01370,MIM:171050;type=snv;aliases=NP_000918;ANNOVAR_DATE=2018-04-16;Func.refGene=exonic;Gene.refGene=ABCB1;GeneDetail.refGene=.;ExonicFunc.refGene=synonymous_SNV;
-            # AAChange.refGene=ABCB1:NM_001348946:exon26:c.T3435C:p.I1145I,ABCB1:NM_000927:exon27:c.T3435C:p.I1145I,ABCB1:NM_001348944:exon28:c.T3435C:p.I1145I,ABCB1:NM_001348945:exon30:c.T3645C:p.I1215I;ALLELE_END
-            tmp = [i for i in info['AAChange.refGene'].split(',') if i.strip()]
-            try:
-                hgvs = [i for i in tmp if i.split(':')[1] in refseq]
-            except:
-                #print(tmp); break
-                hgvs = []
-            if not hgvs:
-                hgvs = tmp
-            info['AAChange.refGene'] = ','.join(hgvs)
-            outf.write('{}\t{}\t{}\t{}\t{}\n'.format(chro, pos, ref, alt, '\t'.join([info.get(i, '.') for i in title])).decode('utf-8'))
+        if isinstance(attrs, (list, tuple)):
+            ipstr, refseq, symbol, strand, hgvs, region, info = attrs
+        elif isinstance(attrs, dict):
+            ipstr, refseq, symbol, strand, hgvs, region, info = [attrs[x] for x in cols]
+        else:
+            raise Exception('unsupport type')
+        self._rawip = (ipstr, refseq, symbol, strand, hgvs, region, info)
+        self.id = ipstr
+        self.hgvsg, self._hgvsc, self._hgvsp = hgvs.split('/')
 
+        fieldname = ['CSQN', 'dbxref', 'aliases', 'candidate_mnv_variants']
+        self.consequence, dbxref, self.aliases, self.alternative = self._parse_info(info, fieldname)
 
+        fieldname = ['GeneID', 'HGNC', 'MIM']
+        self.geneid, self.hgncid, self.omim = self._parse_xref(dbxref, fieldname)
+        self.symbol, self.refseq = symbol, refseq.split()[0]
+        self.type = self._type(self.hgvsg)
+        self.__flagloc = False
 
-def transvar2vcf(transvar, vcf):
-    pattern = re.compile(r'(chr[XYM\d]+):g.([0-9]+)([ATGC]+)>([TCGA]+)')
-    with open(transvar) as fi, open(vcf, 'w') as fo:
-        fo.write('##fileformat=VCFv4.2\n')
-        fo.write('##transvar canno --refversion hg19 --strictversion -l HGVSc.lst --gseq --refseq >variant.txt\n')
-        fo.write('#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n')
-        for i in fi:
-            if i.startswith('#'):
-                continue
-            #CHROM  POS     ID      REF     ALT     QUAL    FILTER  INFO
-            # chrom, pos, hgvsc, ref, alt, _, _, info = i.strip().split('\t')
-            inputl, transcript, gene, strand, coordinates, region, info = i.strip().split('\t')
-            try:
-                transcript, _ = transcript.split()
-            except:
-                # print(transcript)
-                continue
-            gDNA, cds, portein = coordinates.split('/')
-            tmp = pattern.findall(gDNA)
-            if tmp:
-                chrom, pos, ref, alt = tmp.pop()
+    def __str__(self):
+        msg  = '<TransvarObj object: {}; {}>'.format(self.id, self.hgvsg)
+        return msg
+
+    def __repr__(self):
+        return self.__str__()
+
+    def is_valid(self):
+        if self.hgvsg == '.':
+            return False
+        return True
+
+    @staticmethod
+    def _parse_info(info, field):
+        info = [x.partition('=') for x in info.split(';')]
+        info = {x: y if y else True for (x, _, y) in info}
+        return [info.get(x, '.') for x in field]
+
+    @staticmethod
+    def _parse_xref(xref, field):
+        tmp = [m.partition(':') for m in xref.split(',')]
+        xref = {x: y for (x, _, y) in tmp}
+        return [xref.get(x, '.') for x in field]
+
+    @staticmethod
+    def _type(hgvsg):
+        if '>' in hgvsg:
+            return 'snv'
+        elif ('del' in hgvsg) and ('ins' in hgvsg):
+            return 'delins'
+        elif ('del' in hgvsg):
+            return 'del'
+        elif ('ins' in hgvsg):
+            return 'ins'
+        elif ('dup' in hgvsg):
+            return 'dup'
+        else:
+            return None
+
+    @property
+    def hgvsc(self):
+        if not self.is_valid():
+            return '.'
+        return '{}:{}'.format(self.refseq, self._hgvsc)
+
+    @property
+    def hgvsp(self):
+        if not self.is_valid():
+            return '.'
+        return '{}:{}'.format(self.aliases, self._hgvsp)
+
+    @property
+    def location(self):
+        if self.__flagloc:
+            return self.chrom, self.pos, self.ref, self.alt
+
+        if not self.is_valid():
+            self.chrom, self.pos, self.ref, self.alt = '.', '.', '.', '.'
+            return self.chrom, self.pos, self.ref, self.alt
+
+        self.chrom, self.pos, self.ref, self.alt = self._hgvsg_to_chroms(self.hgvsg)
+        self.__flagloc = True
+        return self.chrom, self.pos, self.ref, self.alt
+
+    @property
+    def allLocation(self):
+        if not self.__flagloc:
+            self.location
+
+        item = [(self.chrom, self.pos, self.ref, self.alt), ]
+        if self.alternative != '.':
+            alters = [self._hgvsg_to_chroms(x.strip()) for x in self.alternative.split(',')]
+            item += alters
+        return tuple(item)
+
+    @staticmethod
+    def _hgvsg_to_chroms(hgvsg):
+        def nonDigitIdx(string):
+            for idx, letter in enumerate(string):
+                if not letter.isdigit():
+                    break
+            return idx
+
+        chrom, hgvsg_suffix = hgvsg.split(':g.')
+        if '>' in hgvsg_suffix:
+            pos_ref, alt = hgvsg_suffix.split('>')
+            idx = nonDigitIdx(pos_ref)
+            pos, ref = pos_ref[:idx], pos_ref[idx:]
+        elif ('del' in hgvsg_suffix) and ('ins' in hgvsg_suffix):
+            idel, iins = hgvsg_suffix.index('del'), hgvsg_suffix.index('ins')
+            pos, *end = hgvsg_suffix[:min(idel, iins)].split('_')
+            ref = hgvsg_suffix[idel+3:iins]
+            alt = hgvsg_suffix[iins+3:]
+            if ref == '':    # chr1:g.10689923_10689924delinsGT
+                assert len(end) in (0, 1)
+                ref = 'N' * (int(end[0]) - int(pos) + 1) if end else 'N'
+        elif ('del' in hgvsg_suffix):
+            dix = hgvsg_suffix.index('del')
+            ref = hgvsg_suffix[dix+3:]
+            pos, *end = hgvsg_suffix[:dix].split('_')
+            flag = False
+            for idx, letter in enumerate(ref.upper()):
+                if not (letter in set('ATGCN')):
+                    flag = True
+                    break
+            if flag: ref = ref[:idx]
+            if ref == '':    # chr7:g.55242467_55242481del15
+                assert len(end) in (0, 1)
+                ref = 'N' * (int(end[0]) - int(pos) + 1) if end else 'N'
+            alt = '.'
+        elif ('ins' in hgvsg_suffix):
+            idx = nonDigitIdx(hgvsg_suffix)
+            pos = hgvsg_suffix[:idx]
+            alt = hgvsg_suffix[hgvsg_suffix.index('ins')+3:]
+            ref = '.'
+        elif ('dup' in hgvsg_suffix):
+            dix = hgvsg_suffix.index('dup')
+            alt = hgvsg_suffix[dix+3:]
+            pos, *end = hgvsg_suffix[:dix].split('_')
+            if alt:
+                ref = alt[:1]
+                alt = alt + ref
             else:
-                print(i)
-                continue
-            assert inputl.split(':').pop() == cds, 'Error ... '
-            attr = ('gene={};transcript={};strand={};hgvsc={};hgvsp={};'
-                    '{}').format(gene, transcript, strand, cds, portein, info)
-            tmp = [chrom, pos, '.', ref, alt, '.', '.', attr]
-            fo.write('\t'.join(tmp) + '\n')
+                assert len(end) in (0, 1)
+                ref = 'N' * (int(end[0]) - int(pos) + 1) if end else 'N'
+                alt = ref + ref
+        else:
+            chrom, pos, ref, alt = '.', 0, '.', '.'
+        return (chrom, int(pos), ref, alt)
+
+    def validate_Ref(self, fai):
+        """
+        not implemented
+        """
+        raise NotImplementedError('not implemented')
+        if not self.__flagloc:
+            self.location
+        chrom, pos, ref, alt = self.chrom, self.pos, self.ref, self.alt
+        if chrom.startswith('chr'):
+            chrom = chrom[3:]
+
+        # fai = pysam.FastaFile(reference)
+        if ref.startswith('N'):    # ins, delins, del
+            ref = fai.fetch(reference=chrom, start=pos-1, end=pos+len(ref)-1)
+        if alt == '.':   # del
+            pos = pos - 1
+            alt = fai.fetch(reference=chrom, start=pos-1, end=pos)
+            ref = alt + ref
+        ref = ref.upper()
+        self.pos, self.ref, self.alt = pos, ref, alt.upper()
+
+        REF = fai.fetch(reference=chrom, start=pos-1, end=pos+len(ref)-1).upper()
+        return ref == REF
+
+    def vcf(self):
+        if not self.__flagloc:
+            self.location
+        attrs = {
+            'hgvsg': self.hgvsg,
+            'hgvsc': self.hgvsc,
+            'hgvsp': self.hgvsp,
+            'consequence': self.consequence,
+            'symbol': self.symbol,
+            'refseq': self.refseq,
+            'aliases': self.aliases,
+            'geneid': self.geneid,
+            'hgncid': self.hgncid,
+            'omim': self.omim,
+            'alternative': self.alternative,
+        }
+        return [
+            self.chrom, self.pos, self.id, self.ref, self.alt, '.', '.',
+            ';'.join(['{}={}'.format(x, y) for x, y in attrs.items()])
+        ]
+
+
+class VcfWriter(object):
+    def __init__(self, fp):
+        self._fp = open(fp, 'r')
+        self.__header()
+
+    def __header(self):
+        header  = '##fileformat=VCFv4.1\n'
+        header += '#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n'
+        self._fp.write(header)
+
+    def write(self, content, sep='\t'):
+        if isinstance(content, (list, tuple)):
+            content = sep.join(map(str, content))
+        elif isinstance(content, str):
+            pass
+        else:
+            raise Exception('Unsupport Type')
+        self._fp.write(content)
+
+    def close(self):
+        self._fp.close()
 
 
 ##############################
+##### old methods
 ##############################
+def parseHGVSg(HGVSg):
+    chro, start, end, var_suffix = __extract_location(HGVSg)
 
-def parse_gHGVS(gHGVS):
-    logger.debug(gHGVS)
-    chro, start, end, descri_str = _split_pos_from_gHGVS(gHGVS)
-
-    change = re.compile(r'([ATGC]*)>([ATGC]*)')
-    search_change = change.search(descri_str)
-    if search_change:
-        ref = search_change.group(1)
-        alt = search_change.group(2)
+    patternSnv = re.compile(r'([ATGC]*)>([ATGC]*)')
+    snvmatch = patternSnv.search(var_suffix)
+    if snvmatch:
+        ref = snvmatch.group(1)
+        alt = snvmatch.group(2)
         return chro, start, end, ref, alt, 'snv'
-    if descri_str.startswith('dup'):
-        ref = descri_str[3:]
+    if var_suffix.startswith('dup'):
+        ref = var_suffix[3:]
         return chro, start, end, ref, ref*2, 'dup'
 
-    del_seq = re.compile(r'del([ATGC]*)')
-    ins_seq = re.compile(r'ins([ATGC]*)')
-    if 'ins' in descri_str and 'del' in descri_str:
-        ref = del_seq.search(descri_str).group(1)
-        alt = ins_seq.search(descri_str).group(1)
+    patternDel = re.compile(r'del([ATGC]*)')
+    patternIns = re.compile(r'ins([ATGC]*)')
+    if 'ins' in var_suffix and 'del' in var_suffix:
+        ref = patternDel.search(var_suffix).group(1)
+        alt = patternIns.search(var_suffix).group(1)
         return chro, start, end, ref, alt, 'delins'
-    elif 'del' in descri_str:
-        ref = del_seq.search(descri_str).group(1)
+    elif 'del' in var_suffix:
+        ref = patternDel.search(var_suffix).group(1)
         return chro, start, end, ref, '', 'del'
-    elif 'ins' in descri_str:
-        alt = ins_seq.search(descri_str).group(1)
+    elif 'ins' in var_suffix:
+        alt = patternIns.search(var_suffix).group(1)
         return chro, start, start, '', alt, 'ins'
     else:
-        return chro, start, end, '', '', 'None'
+        return chro, start, end, '', '', 'nan'
 
 
-def _split_pos_from_gHGVS(gHGVS):
-    chro, _, string = gHGVS.strip().partition(':g.')
+def __extract_location(HGVSg):
+    chro, _, string = HGVSg.strip().partition(':g.')
     string = string.strip(' \n\r\t()_')
     for i, j in enumerate(string):
         if not j.isdigit():
@@ -117,211 +276,11 @@ def _split_pos_from_gHGVS(gHGVS):
     string = string[i:].strip(' \n\r\t()_')
     if string.isdigit():
         end = string
-        change_descri = ''
+        suffix = ''
     else:
         for i, j in enumerate(string):
             if not j.isdigit():
                 break
         end = string[:i] if string[:i] else start
-        change_descri = string[i:]
-    return chro, int(start), int(end), change_descri
-
-
-class mutation(object):
-    '''
-    '''
-    def __init__(self, chro, pos, ref, alt, meta=None, ref_fp=None):
-        self._chro = chro
-        self._pos = pos if isinstance(pos, int) else int(pos)
-        self._ref = ref.upper()
-        self._alt = alt.upper()
-        self._meta = meta
-        self._fp = ref_fp
-        self._valid_data()
-
-    def _valid_data(self):
-        flag_exit = []
-        if set(self._ref) - set('ATGC'):
-            logger.error('Error: illegal alpha in ref nucl seq: {}'.format(self._ref))
-            flag_exit.append(True)
-        if set(self._alt) - set('ATGC'):
-            logger.error('Error: illegal alpha in alt nucl seq: {}'.format(self._alt))
-            flag_exit.append(True)
-
-        if self._fp:
-            ref = self._fp.fetch(
-                reference=self._chro,
-                start=self._pos - 1,
-                end=self._pos + len(self._ref) - 1
-            )
-            if ref.upper() != self._ref:
-                infor = 'Error: genome seq({}) is not equal with ref seq({}) of variant'.format(ref, self._ref)
-                logger.error(infor)
-                flag_exit.append(True)
-        if any(flag_exit):
-            logger.error('Error: QC fail for variant site:')
-            self.write_variant_to_vcf(sys.stderr)
-            sys.exit(1)
-
-    @property
-    def chro(self):
-        return self._chro
-
-    @property
-    def pos(self):
-        return self._pos
-
-    @property
-    def ref(self):
-        return self._ref
-
-    @property
-    def alt(self):
-        return self._alt
-
-    def write_variant_to_vcf(self, fp):
-        '''
-            #CHROM  POS     ID      REF     ALT     QUAL    FILTER  INFO
-        '''
-        if self._meta:
-            meta = ';'.join(['{}={}'.format(i, self._meta[i]) for i in self._meta])
-        else:
-            meta = '.'
-        fp.write(
-            '{chro}\t{pos}\t{id}\t{ref}\t{alt}\t{qual}\t{filter}\t{info}\n'.format(
-                chro=self._chro,
-                pos=self._pos,
-                id='.',
-                ref=self._ref,
-                alt=self._alt,
-                qual='.',
-                filter='.',
-                info=meta
-            )
-        )
-
-    def write_variant_to_annovar(self, fp):
-        '''
-            #Chr     Start   End     Ref     Alt
-        '''
-        fp.write(
-            '{chro}\t{start}\t{end}\t{ref}\t{alt}\n'.format(
-                chro=self._chro,
-                start=self._pos,
-                end=self._pos + len(self._ref) - 1,
-                ref=self._ref,
-                alt=self._alt
-            )
-        )
-
-
-def transvar2vcf(transvar, reference):
-    fp_ref = pysam.FastaFile(reference)
-    with open(transvar) as f:
-        _ = f.readline()
-        title = ['input', 'transcript', 'gene', 'strand', 'coordinates', 'region', 'info']
-        for line in f:
-            input_var, _, transvar_info = line.strip().partition('\t')
-            transvar_info = [i.strip().split('\t') for i in transvar_info.split('|||')]
-            hgvs_genome = [i[3].split('/')[0] for i in transvar_info]
-            if len(set(hgvs_genome)) == 1:
-                input_var_transvar = transvar_info[0]
-            else:
-                hgvs_genome = sorted(
-                    Counter(hgvs_genome).items(), key=lambda x: x[1], reverse=True
-                )
-                if hgvs_genome[0][1] > hgvs_genome[1][1]:
-                    gHGVS = hgvs_genome[0][0]
-                    input_var_transvar = [i for i in transvar_info if i[3].split('/')[0]==gHGVS][0]
-                else:
-                    logger.warning('Error: Inconsistent genomic location of variant, Skip...\n    {}'.format(line))
-                    # sys.exit(1)
-                    continue
-            transcript, gene, strand, coordinates, region, info = input_var_transvar
-            if '././.' == coordinates:
-                logger.debug('Debug: invalid input HGVS infor, Skip...')
-                continue
-
-            info = [i.split('=') for i in info.strip().split(';')]
-            info = {i[0]: i[1] for i in info if len(i)==2}
-            # CSQN=Missense;reference_codon=CAG;candidate_codons=AAG,AAA;
-            # candidate_mnv_variants=chr4:g.89052321_89052323delCTGinsTTT;
-            # dbxref=GeneID:9429,HGNC:74,MIM:603756;aliases=XP_005263413;source=RefSeq
-
-            # example
-            # gHGVS = info.get('candidate_mnv_variants', '').split(',')
-
-            gHGVS, cHGVS, pHGVS = coordinates.split('/')
-            chro, start, end, ref, alt, vtype = parse_gHGVS(gHGVS)
-            if vtype == 'snv':
-                assert len(ref)==(end-start+1), 'Error: {}'.format(line)
-                pos = start
-            elif vtype == 'dup':
-                if not ref:
-                    ref = fp_ref.fetch(reference=chro, start=start-1, end=end)
-                assert len(ref)==(end-start+1), 'Error: {}'.format(line)
-                pos = end
-                alt = ref[-1:] + ref
-                ref = ref[-1:]
-            elif vtype == 'delins':
-                if not ref:
-                    ref = fp_ref.fetch(reference=chro, start=start-1, end=end)
-                # assert len(ref)==(end-start+1), 'Error: {}'.format(line)
-                if not len(ref)==(end-start+1):
-                    logger.warning(
-                        ('Error: length of ref seq is inconsistent '
-                        'with location({}:{}-{}), Skip...\n    {}').format(
-                            chro, start, end, line
-                        )
-                    )
-                    continue
-                pos = start
-            elif vtype == 'del':
-                if not ref:
-                    ref = fp_ref.fetch(reference=chro, start=start-1, end=end)
-                assert len(ref)==(end-start+1), 'Error: {}'.format(line)
-                alt = fp_ref.fetch(reference=chro, start=start-2, end=start-1)
-                ref = alt+ref
-                pos = start - 1
-            elif vtype == 'ins':
-                pos = start
-                ref = fp_ref.fetch(reference=chro, start=pos-1, end=pos)
-                alt = ref + alt
-            else:
-                # chro, start, end, '', '', 'None'
-                logger.warning('Warning: uncalssification variant, Skip...\n    {}'.format(line))
-                continue
-            tmp = {
-                'type': vtype,
-                'input': input_var,
-                'gHGVS': gHGVS,
-                'cHGVS': cHGVS,
-                'pHGVS': pHGVS,
-            }
-            info = dict(info.items() + tmp.items())
-            mutsite = mutation(
-                chro,
-                pos,
-                ref,
-                alt,
-                info,
-                fp_ref,    # pysam fasta file handle
-            )
-            yield mutsite
-    fp_ref.close()
-
-
-
-if __name__ == '__main__':
-    try:
-        _, transvar, reference, vcf = sys.argv
-    except:
-        sys.stdout.write('USAGE: \n')
-        sys.stdout.write('    python script transvar.out reference.fa mutation.vcf\n\n')
-        sys.stdout.write('    cmd of transvar:\n')
-        sys.stdout.write('        transvar canno --refversion hg19 --refseq -l HGVS_cds --oneline >transvar.out\n')
-        sys.exit(1)
-
-    with open(vcf, 'w') as f:
-        for site in transvar2vcf(transvar, reference):
-            site.write_variant_to_vcf(f)
+        suffix = string[i:]
+    return chro, int(start), int(end), suffix
