@@ -53,6 +53,11 @@ class CsqSelector(object):
 
     @staticmethod
     def __parse_hgnc(text):
+        """
+        Canonical transcript refseq ID of gene Nomenclature download from
+            HUGO Gene Nomenclature Committee (https://www.genenames.org),
+            ftp://ftp.ebi.ac.uk/pub/databases/genenames/new/tsv/hgnc_complete_set.txt
+        """
         fopen, fmode = (gzip.open, 'rt') if text.endswith('gz') else (open, 'r')
         hgnc2refseq = {}
         with fopen(text, fmode) as fi:
@@ -103,7 +108,8 @@ class CsqSelector(object):
         1. whether or not transcript ID from "RefSeq"
         2. use "latest version" of transcript, delete older
         3. transcript type is "protein_coding"
-        4. variant changes amino acid code
+        4. variant changes amino acid code, ref as
+            https://asia.ensembl.org/info/genome/variation/prediction/predicted_data.html
         5. gene symbol is "design gene of panel"
         # 6. "rna match" records if refseq
         # 7. random records from remain
@@ -150,7 +156,7 @@ class CsqSelector(object):
     def __ToDict(dat):
         dt = dat[dat['tags'].apply(lambda x: x.startswith(('PASS', 'random')))]
         if dt.empty:
-            dt = dat.loc[dat.index[0], ]
+            dt = dat.loc[[dat.index[0], ], ]
         dat = dat[dat['SYMBOL'].isin( set(dt['SYMBOL']) )]
         idx = list(dt.index).pop()
         cols = [
